@@ -1,12 +1,7 @@
 import streamlit as st
-import os
-import sys
-import subprocess
-
-import cv2
-
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+import os
 from collections import Counter
 
 # Set up page layout and styling
@@ -50,12 +45,12 @@ IOU = 0.7
 IMGSZ = 640
 
 WBC_SUBTYPES = {"Neutrophil", "Lymphocyte", "Monocyte", "Eosinophil", "Basophil"}
-# Colors in RGB format for Streamlit/PIL
-COLOR_RBC = (255, 0, 0)      # Red
-COLOR_PLATELETS = (0, 200, 0)# Green
-COLOR_WBC = (0, 80, 255)     # Blue
+# Colors in RGB format for Pillow
+COLOR_RBC = (255, 0, 0)       # Red
+COLOR_PLATELETS = (0, 200, 0) # Green
+COLOR_WBC = (0, 80, 255)      # Blue
 
-def color_for(name: str) -> tuple[int, int, int]:
+def color_for(name: str) -> tuple:
     if name == "RBC":
         return COLOR_RBC
     if name == "Platelets":
@@ -73,56 +68,71 @@ def load_model():
         st.stop()
     return YOLO(model_path)
 
-def annotate(img, boxes_xyxy, classes, names) -> None:
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    fs, ft, bt = 0.4, 1, 1
+def annotate(img_pil, boxes_xyxy, classes, names):
+    """Draw bounding boxes and labels using Pillow (no OpenCV needed)."""
+    draw = ImageDraw.Draw(img_pil)
+    # Try to load a small built-in font; fall back to default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+    except (IOError, OSError):
+        font = ImageFont.load_default()
+
     for (x1, y1, x2, y2), c in zip(boxes_xyxy, classes):
         name = names[int(c)]
         col = color_for(name)
-        x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
-        cv2.rectangle(img, (x1, y1), (x2, y2), col, bt)
-        (tw, th), _ = cv2.getTextSize(name, font, fs, ft)
-        ly = y1 - 2
-        if ly - th - 2 < 0:
-            ly = y1 + th + 4
-        cv2.rectangle(img, (x1, ly - th - 2), (x1 + tw + 2, ly + 1), col, -1)
-        # Using RGB colors, white text remains (255, 255, 255)
-        cv2.putText(img, name, (x1 + 1, ly - 1), font, fs, (255, 255, 255), ft, cv2.LINE_AA)
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+        # Draw bounding box
+        draw.rectangle([x1, y1, x2, y2], outline=col, width=1)
+
+        # Measure text
+        bbox = font.getbbox(name)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+
+        # Draw label background
+        label_y = y1 - th - 4
+        if label_y < 0:
+            label_y = y1 + 2
+        draw.rectangle([x1, label_y, x1 + tw + 4, label_y + th + 4], fill=col)
+        draw.text((x1 + 2, label_y + 1), name, fill=(255, 255, 255), font=font)
+
+    return img_pil
 
 def process_image(model, image_pil):
-    # Convert PIL Image to numpy array (RGB)
+    # Convert PIL Image to numpy array (RGB) for YOLO
     img_rgb = np.array(image_pil)
-    
+
     # Run prediction
     results = model.predict(
         source=img_rgb,
         conf=CONF, iou=IOU, imgsz=IMGSZ,
         save=False, verbose=False,
     )
-    
+
     r = results[0]
     boxes = r.boxes.xyxy.cpu().numpy()
     classes = r.boxes.cls.cpu().numpy().astype(int)
-    
-    # We annotate directly on the RGB image because Streamlit expects RGB
-    annotated_img = img_rgb.copy()
-    annotate(annotated_img, boxes, classes, r.names)
-    
+
+    # Annotate using Pillow
+    annotated_pil = image_pil.copy()
+    annotate(annotated_pil, boxes, classes, r.names)
+
     counts = Counter(r.names[int(c)] for c in classes)
-    
-    return annotated_img, counts
+
+    return annotated_pil, counts
 
 def main():
     st.title("🔬 Blood Cell Detection")
     st.markdown("Upload a peripheral blood smear image or use your webcam to automatically detect and classify blood cells.")
-    
+
     model = load_model()
-    
+
     st.sidebar.header("Input Options")
     input_source = st.sidebar.radio("Choose input method:", ["Upload Image", "Webcam"])
-    
+
     image_pil = None
-    
+
     if input_source == "Upload Image":
         uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
         if uploaded_file is not None:
@@ -131,18 +141,18 @@ def main():
         camera_input = st.camera_input("Take a picture")
         if camera_input is not None:
             image_pil = Image.open(camera_input).convert("RGB")
-            
+
     if image_pil is not None:
         st.markdown("### Analysis Results")
-        
+
         with st.spinner("Analyzing image..."):
             annotated_img, counts = process_image(model, image_pil)
-            
+
         col1, col2 = st.columns([2, 1])
-        
+
         with col1:
             st.image(annotated_img, caption="Processed Image", use_container_width=True)
-            
+
         with col2:
             st.markdown("### Detected Cells")
             if not counts:
@@ -150,18 +160,18 @@ def main():
             else:
                 total_cells = sum(counts.values())
                 st.markdown(f'<div class="metric-card"><h4>Total Cells</h4><h2 style="margin:0; color:#3182ce;">{total_cells}</h2></div>', unsafe_allow_html=True)
-                
+
                 # Separate counts into categories
                 rbc_count = counts.get("RBC", 0)
                 plt_count = counts.get("Platelets", 0)
-                
+
                 wbc_counts = {k: v for k, v in counts.items() if k in WBC_SUBTYPES}
                 wbc_total = sum(wbc_counts.values())
-                
+
                 st.markdown(f"**🔴 RBC:** {rbc_count}")
                 st.markdown(f"**🟢 Platelets:** {plt_count}")
                 st.markdown(f"**🔵 WBC (Total):** {wbc_total}")
-                
+
                 if wbc_total > 0:
                     st.markdown("#### WBC Differential")
                     for wbc_type, count in wbc_counts.items():
