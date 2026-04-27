@@ -1,8 +1,20 @@
 import streamlit as st
-import cv2
+import os
+import sys
+import subprocess
+
+# --- STREAMLIT CLOUD OPENCV FIX ---
+try:
+    import cv2
+    cv2.imread # test if it's functional
+except (ImportError, AttributeError):
+    subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "opencv-python", "opencv-python-headless"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless"])
+    import cv2
+# ----------------------------------
+
 import numpy as np
 from PIL import Image
-import os
 from collections import Counter
 
 # Set up page layout and styling
